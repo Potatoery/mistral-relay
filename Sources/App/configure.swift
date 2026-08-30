@@ -8,13 +8,16 @@ public func configure(_ app: Application) async throws {
     } else {
         app.logger.logLevel = .info
     }
-    
+
+    // Allow Vapor to larger payload
+    app.routes.defaultMaxBodySize = "500kb"
+
     // Add header filter middleware - filters incoming request headers
     app.addHeaderFilterMiddleware()
-    
+
     // Register routes
     app.addMistralProxyRoutes()
-    
+
     // Configure CORS - allow all origins for development
     let corsConfiguration = CORSMiddleware.Configuration(
         allowedOrigin: .all,
@@ -23,12 +26,10 @@ public func configure(_ app: Application) async throws {
         allowCredentials: true
     )
     app.middleware.use(CORSMiddleware(configuration: corsConfiguration))
-    
+
     // Error middleware
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
-    
+
     // Log startup
     app.logger.info("Mistral Relay starting on port: \(AppConfig.Server.port)")
 }
-
-
