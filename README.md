@@ -342,6 +342,12 @@ Executed 8 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
 
 ---
 
+## Acknowledgments
+
+This project was made with AI assistance.
+
+---
+
 ## License
 
 This project is licensed under the MIT License.
