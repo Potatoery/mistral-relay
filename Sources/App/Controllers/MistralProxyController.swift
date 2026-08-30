@@ -30,7 +30,7 @@ struct MistralProxyController: RouteCollection {
     func proxyToMistral(req: Request) async throws -> Response {
         let targetURL = AppConfig.Mistral.baseURL + AppConfig.Mistral.chatCompletionsPath
 
-        // 1. Request Body 수집 및 필터링
+        // 1. Collect and filter the request body
         let bodyBuffer = try await req.body.collect(upTo: 1024 * 1024)
         let filteredBodyByteBuffer: ByteBuffer
 
@@ -45,18 +45,18 @@ struct MistralProxyController: RouteCollection {
             filteredBodyByteBuffer = bodyBuffer
         }
 
-        // 2. 안전한 헤더 재구성 (replaceOrAdd 및 first(named:) 사용으로 중복/분할 방지)
+        // 2. Safely reconstruct headers (using replaceOrAdd and first(named:) to prevent duplication/splitting)
         var headers = HTTPHeaders()
         
-        // Allowed / Blocked 목록 기반 헤더 복사
+        // Copy headers based on Allowed / Blocked list
         let allowedHeaders = AppConfig.Mistral.allowedHeaders.map { $0.lowercased() }
         let blockedHeaders = AppConfig.Mistral.blockedHeaders.map { $0.lowercased() }
 
         for allowedName in allowedHeaders {
             if blockedHeaders.contains(allowedName) { continue }
             
-            // req.headers[allowedName]은 [String] 배열을 반환합니다.
-            // 쪼개져 들어온 문자들을 하나의 문자열로 다시 이어붙입니다.
+            // req.headers[allowedName] returns an array of [String].
+            // Join the split segments back into a single string.
             let values = req.headers[allowedName]
             if !values.isEmpty {
                 let combinedValue = values.joined()
@@ -64,7 +64,7 @@ struct MistralProxyController: RouteCollection {
             }
         }
 
-        // 3. HTTPClientRequest 생성 및 전송
+        // 3. Create and send HTTPClientRequest
         var httpRequest = HTTPClientRequest(url: targetURL)
         httpRequest.method = .POST
         httpRequest.headers = headers
@@ -74,13 +74,13 @@ struct MistralProxyController: RouteCollection {
         let httpResponse = try await httpClient.execute(httpRequest, timeout: .seconds(120))
         let status = HTTPResponseStatus(statusCode: Int(httpResponse.status.code))
 
-        // 4. Vapor Response 헤더 복사
+        // 4. Copy Vapor Response headers
         var responseHeaders = HTTPHeaders()
         for header in httpResponse.headers {
             responseHeaders.add(name: header.name, value: header.value)
         }
 
-        // 5. 스트리밍 응답 전달
+        // 5. Forward streaming response
         let body = Response.Body(stream: { writer in
             Task {
                 do {

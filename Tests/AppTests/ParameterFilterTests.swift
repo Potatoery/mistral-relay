@@ -15,7 +15,7 @@ final class ParameterFilterTests: XCTestCase {
             "stream": false
         ]
         
-        let filtered = MistralParameters.filterRequestBody(input)
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
         
         // All parameters should be kept (they're all in the allowed list)
         XCTAssertEqual(filtered.count, 5)
@@ -38,7 +38,7 @@ final class ParameterFilterTests: XCTestCase {
             "custom_field": ["a", "b", "c"]
         ]
         
-        let filtered = MistralParameters.filterRequestBody(input)
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
         
         // Only allowed parameters should remain
         XCTAssertEqual(filtered.count, 3)
@@ -54,7 +54,7 @@ final class ParameterFilterTests: XCTestCase {
     
     func testFilterRequestBodyHandlesEmptyInput() {
         let input: [String: Any] = [:]
-        let filtered = MistralParameters.filterRequestBody(input)
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
         XCTAssertTrue(filtered.isEmpty)
     }
     
@@ -70,7 +70,7 @@ final class ParameterFilterTests: XCTestCase {
             "unsupported": "value"
         ]
         
-        let filtered = MistralParameters.filterRequestBody(input)
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
         
         XCTAssertEqual(filtered.count, 3)
         XCTAssertNotNil(filtered["model"])

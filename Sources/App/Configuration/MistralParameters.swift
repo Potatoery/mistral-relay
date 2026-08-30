@@ -47,7 +47,7 @@ struct MistralParameters {
         for (key, value) in body {
             if allowedRequestBodyKeys.contains(key) {
                 if key == "messages", let messages = value as? [[String: Any]] {
-                    // messages 배열 내부의 개별 메시지 객체 필드 정제 및 로그 출력
+                    // Clean up individual message object fields inside the messages array and log details
                     filtered[key] = messages.map { message in
                         var cleanedMessage: [String: Any] = [:]
                         for (msgKey, msgValue) in message {
