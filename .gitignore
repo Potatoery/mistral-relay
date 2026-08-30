@@ -1,0 +1,13 @@
+.DS_Store
+**/.DS_Store
+.build/
+xcuserdata/
+DerivedData/
+.netrc/
+uhp_data/
+.swiftpm/
+**/*.xctestplan
+*.xctestplan
+.cache/
+.clang-module-cache/
+*.log
