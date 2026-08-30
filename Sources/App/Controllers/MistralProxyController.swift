@@ -16,8 +16,8 @@ struct MistralProxyController: RouteCollection {
         routes.get("health", use: healthCheck)
 
         // API routes
-        let mistralRoutes = routes.grouped("api", "v1")
-        mistralRoutes.post("completions", use: proxyToMistral)
+        let mistralRoutes = routes.grouped("api", "v1", "chat")
+        mistralRoutes.on(.POST, .constant("completions"), body: .stream, use: proxyToMistral)
     }
 
     /// Health check endpoint
@@ -26,82 +26,79 @@ struct MistralProxyController: RouteCollection {
     }
 
     /// Proxy request to Mistral API
+    /// Proxy request to Mistral API
     func proxyToMistral(req: Request) async throws -> Response {
-        // Build the target URL
         let targetURL = AppConfig.Mistral.baseURL + AppConfig.Mistral.chatCompletionsPath
 
-        // Get the request body
-        let bodyBuffer = try await req.body.collect(upTo: 1024 * 1024) // 1MB limit
-
-        // Parse JSON body to filter parameters
-        let bodyString = String(buffer: bodyBuffer)
-
-        // Try to parse and filter the request body parameters
+        // 1. Request Body 수집 및 필터링
+        let bodyBuffer = try await req.body.collect(upTo: 1024 * 1024)
         let filteredBodyByteBuffer: ByteBuffer
-        if let jsonData = bodyString.data(using: .utf8),
-           var requestBody = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
 
-            // Filter out unsupported parameters
-            requestBody = MistralParameters.filterRequestBody(requestBody)
-
-            // Re-encode the filtered body
-            if let filteredData = try? JSONSerialization.data(withJSONObject: requestBody) {
+        if let jsonData = try? JSONSerialization.jsonObject(with: Data(buffer: bodyBuffer)) as? [String: Any] {
+            let filteredRequestBody = MistralParameters.filterRequestBody(jsonData, logger: req.logger)
+            if let filteredData = try? JSONSerialization.data(withJSONObject: filteredRequestBody) {
                 filteredBodyByteBuffer = ByteBuffer(bytes: filteredData)
             } else {
                 filteredBodyByteBuffer = bodyBuffer
             }
         } else {
-            // If not valid JSON, forward as-is
             filteredBodyByteBuffer = bodyBuffer
         }
 
-        // Build filtered headers for Mistral
+        // 2. 안전한 헤더 재구성 (replaceOrAdd 및 first(named:) 사용으로 중복/분할 방지)
         var headers = HTTPHeaders()
+        
+        // Allowed / Blocked 목록 기반 헤더 복사
+        let allowedHeaders = AppConfig.Mistral.allowedHeaders.map { $0.lowercased() }
+        let blockedHeaders = AppConfig.Mistral.blockedHeaders.map { $0.lowercased() }
 
-        let allowedHeaders = AppConfig.Mistral.allowedHeaders
-        let blockedHeaders = AppConfig.Mistral.blockedHeaders
-
-        for (name, value) in req.headers {
-            let lowercasedName = name.lowercased()
-
-            // Skip blocked headers
-            if blockedHeaders.contains(lowercasedName) {
-                continue
-            }
-
-            // Only forward allowed headers
-            if allowedHeaders.contains(lowercasedName) {
-                headers.add(name: name, value: value)
+        for allowedName in allowedHeaders {
+            if blockedHeaders.contains(allowedName) { continue }
+            
+            // req.headers[allowedName]은 [String] 배열을 반환합니다.
+            // 쪼개져 들어온 문자들을 하나의 문자열로 다시 이어붙입니다.
+            let values = req.headers[allowedName]
+            if !values.isEmpty {
+                let combinedValue = values.joined()
+                headers.replaceOrAdd(name: allowedName, value: combinedValue)
             }
         }
 
-        // Ensure we have content-type for JSON
-        if headers["content-type"].isEmpty && headers["Content-Type"].isEmpty {
-            headers.add(name: "Content-Type", value: "application/json")
-        }
-
-        // Create HTTPClientRequest
+        // 3. HTTPClientRequest 생성 및 전송
         var httpRequest = HTTPClientRequest(url: targetURL)
         httpRequest.method = .POST
         httpRequest.headers = headers
         httpRequest.body = .bytes(filteredBodyByteBuffer)
+        
 
-        // Execute the request with timeout
         let httpResponse = try await httpClient.execute(httpRequest, timeout: .seconds(120))
-
-        // Create Vapor response from Mistral response
         let status = HTTPResponseStatus(statusCode: Int(httpResponse.status.code))
-        let vaporResponse = Response(status: status, headers: httpResponse.headers)
 
-        // Collect response body
-        let responseBodyBuffer = try await httpResponse.body.collect(upTo: 1024 * 1024)
-        vaporResponse.body = Response.Body(buffer: responseBodyBuffer)
+        // 4. Vapor Response 헤더 복사
+        var responseHeaders = HTTPHeaders()
+        for header in httpResponse.headers {
+            responseHeaders.add(name: header.name, value: header.value)
+        }
 
-        return vaporResponse
+        // 5. 스트리밍 응답 전달
+        let body = Response.Body(stream: { writer in
+            Task {
+                do {
+                    for try await chunk in httpResponse.body {
+                        _ = writer.write(.buffer(chunk))
+                    }
+                    _ = writer.write(.end)
+                } catch {
+                    _ = writer.write(.error(error))
+                }
+            }
+        })
+
+        return Response(status: status, headers: responseHeaders, body: body)
     }
 }
 
-// Extension for easy registration
+// MARK: - Extension for Application Registration
 extension Application {
     func addMistralProxyRoutes() {
         let httpClient = HTTPClient(
