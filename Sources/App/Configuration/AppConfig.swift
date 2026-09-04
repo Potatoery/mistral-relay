@@ -4,6 +4,7 @@ struct AppConfig {
     struct Mistral {
         static let baseURL = Environment.get("MISTRAL_BASE_URL") ?? "https://api.mistral.ai"
         static let chatCompletionsPath = Environment.get("MISTRAL_COMPLETIONS_PATH") ?? "/v1/chat/completions"
+        static let modelsPath = Environment.get("MISTRAL_MODELS_PATH") ?? "/v1/models"
         
         // Headers that are allowed to be forwarded to Mistral API
         // Add more headers here as needed for your use case

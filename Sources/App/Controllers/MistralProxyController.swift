@@ -18,6 +18,10 @@ struct MistralProxyController: RouteCollection {
         // API routes
         let mistralRoutes = routes.grouped("api", "v1", "chat")
         mistralRoutes.on(.POST, .constant("completions"), body: .stream, use: proxyToMistral)
+        
+        // Models endpoint
+        let modelsRoutes = routes.grouped("api", "v1", "models")
+        modelsRoutes.get(use: getModels)
     }
 
     /// Health check endpoint
@@ -95,6 +99,48 @@ struct MistralProxyController: RouteCollection {
         })
 
         return Response(status: status, headers: responseHeaders, body: body)
+    }
+
+    /// Get available models from Mistral API
+    func getModels(req: Request) async throws -> Response {
+        let targetURL = AppConfig.Mistral.baseURL + AppConfig.Mistral.modelsPath
+        
+        // Create and send HTTPClientRequest
+        var httpRequest = HTTPClientRequest(url: targetURL)
+        httpRequest.method = .GET
+        
+        // Forward relevant headers
+        var headers = HTTPHeaders()
+        let allowedHeaders = AppConfig.Mistral.allowedHeaders.map { $0.lowercased() }
+        let blockedHeaders = AppConfig.Mistral.blockedHeaders.map { $0.lowercased() }
+
+        for allowedName in allowedHeaders {
+            if blockedHeaders.contains(allowedName) { continue }
+            let values = req.headers[allowedName]
+            if !values.isEmpty {
+                let combinedValue = values.joined()
+                headers.replaceOrAdd(name: allowedName, value: combinedValue)
+            }
+        }
+        
+        httpRequest.headers = headers
+        
+        let httpResponse = try await httpClient.execute(httpRequest, timeout: .seconds(120))
+        let status = HTTPResponseStatus(statusCode: Int(httpResponse.status.code))
+
+        // Collect the entire response body
+        var responseBody = ByteBuffer()
+        for try await chunk in httpResponse.body {
+            responseBody.writeImmutableBuffer(chunk)
+        }
+
+        // Copy Vapor Response headers
+        var responseHeaders = HTTPHeaders()
+        for header in httpResponse.headers {
+            responseHeaders.add(name: header.name, value: header.value)
+        }
+
+        return Response(status: status, headers: responseHeaders, body: .init(buffer: responseBody))
     }
 }
 
