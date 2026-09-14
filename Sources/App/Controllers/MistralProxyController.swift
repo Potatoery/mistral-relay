@@ -1,14 +1,22 @@
 import Vapor
 import AsyncHTTPClient
 import NIOCore
+import Dispatch
 
 struct MistralProxyController: RouteCollection {
 
     // HTTP client for forwarding requests
     let httpClient: HTTPClient
+    
+    // Shared retry handler for streaming requests
+    let streamingRetryHandler: StreamingRetryHandler
 
     init(httpClient: HTTPClient = HTTPClient()) {
         self.httpClient = httpClient
+        self.streamingRetryHandler = StreamingRetryHandler(
+            httpClient: httpClient,
+            logger: Logger(label: "com.mistral.relay")
+        )
     }
 
     func boot(routes: RoutesBuilder) throws {
@@ -29,8 +37,7 @@ struct MistralProxyController: RouteCollection {
         return Response(status: .ok, body: .init(string: "OK"))
     }
 
-    /// Proxy request to Mistral API
-    /// Proxy request to Mistral API
+    /// Proxy request to Mistral API with retry and keep-alive support
     func proxyToMistral(req: Request) async throws -> Response {
         let targetURL = AppConfig.Mistral.baseURL + AppConfig.Mistral.chatCompletionsPath
 
@@ -68,37 +75,61 @@ struct MistralProxyController: RouteCollection {
             }
         }
 
-        // 3. Create and send HTTPClientRequest
+        // 3. Create HTTPClientRequest
         var httpRequest = HTTPClientRequest(url: targetURL)
         httpRequest.method = .POST
         httpRequest.headers = headers
         httpRequest.body = .bytes(filteredBodyByteBuffer)
         
+        // 4. Run the first attempt inline so success/non-retryable responses can forward the
+        // real upstream status and headers. Only fall back to an always-.ok keep-alive stream
+        // (see StreamingRetryHandler.continueStreaming) once a retry is actually required -
+        // that path can't know the eventual status ahead of time.
+        let retryHandler = streamingRetryHandler
+        let outcome = try await retryHandler.executeInitialAttempt(httpRequest)
 
-        let httpResponse = try await httpClient.execute(httpRequest, timeout: .seconds(120))
-        let status = HTTPResponseStatus(statusCode: Int(httpResponse.status.code))
-
-        // 4. Copy Vapor Response headers
-        var responseHeaders = HTTPHeaders()
-        for header in httpResponse.headers {
-            responseHeaders.add(name: header.name, value: header.value)
-        }
-
-        // 5. Forward streaming response
-        let body = Response.Body(stream: { writer in
-            Task {
-                do {
-                    for try await chunk in httpResponse.body {
-                        _ = writer.write(.buffer(chunk))
-                    }
-                    _ = writer.write(.end)
-                } catch {
-                    _ = writer.write(.error(error))
-                }
+        switch outcome {
+        case .complete(let upstreamResponse):
+            let status = HTTPResponseStatus(statusCode: Int(upstreamResponse.status.code))
+            var responseHeaders = HTTPHeaders()
+            for header in upstreamResponse.headers {
+                responseHeaders.add(name: header.name, value: header.value)
             }
-        })
 
-        return Response(status: status, headers: responseHeaders, body: body)
+            let body = Response.Body(stream: { writer in
+                Task {
+                    do {
+                        for try await chunk in upstreamResponse.body {
+                            _ = writer.write(.buffer(chunk))
+                        }
+                        _ = writer.write(.end)
+                    } catch {
+                        req.logger.error("Streaming failed: \(error)")
+                        _ = writer.write(.error(error))
+                    }
+                }
+            })
+
+            return Response(status: status, headers: responseHeaders, body: body)
+
+        case .retrying(let pending):
+            // We already know the first attempt needs a retry, so there's no status to report
+            // yet - answer with .ok now and keep the connection alive with SSE comments while
+            // backing off, the same way a genuinely long-running stream would.
+            let body = Response.Body(stream: { writer in
+                Task {
+                    do {
+                        let finalStatus = try await retryHandler.continueStreaming(pending, writer: writer)
+                        req.logger.debug("Streaming completed with status \(finalStatus)")
+                    } catch {
+                        req.logger.error("All retries failed: \(error)")
+                        _ = writer.write(.error(error))
+                    }
+                }
+            })
+
+            return Response(status: .ok, headers: [:], body: body)
+        }
     }
 
     /// Get available models from Mistral API
@@ -125,22 +156,77 @@ struct MistralProxyController: RouteCollection {
         
         httpRequest.headers = headers
         
-        let httpResponse = try await httpClient.execute(httpRequest, timeout: .seconds(120))
-        let status = HTTPResponseStatus(statusCode: Int(httpResponse.status.code))
-
+        // For non-streaming requests, use simple retry without keep-alive
+        // This is simpler since we don't need to maintain a stream during retry
+        let response = try await executeWithRetry(httpRequest)
+        
         // Collect the entire response body
         var responseBody = ByteBuffer()
-        for try await chunk in httpResponse.body {
+        for try await chunk in response.body {
             responseBody.writeImmutableBuffer(chunk)
         }
 
-        // Copy Vapor Response headers
+        // Copy response headers
         var responseHeaders = HTTPHeaders()
-        for header in httpResponse.headers {
+        for header in response.headers {
             responseHeaders.add(name: header.name, value: header.value)
         }
 
-        return Response(status: status, headers: responseHeaders, body: .init(buffer: responseBody))
+        return Response(status: response.status, headers: responseHeaders, body: .init(buffer: responseBody))
+    }
+    
+    /// Execute a non-streaming request with simple retry (no keep-alive needed)
+    private func executeWithRetry(_ request: HTTPClientRequest) async throws -> HTTPClientResponse {
+        let retryConfig = RetryConfig()
+        let startTime = DispatchTime.now()
+        var attempt = 0
+
+        while true {
+            do {
+                let response = try await httpClient.execute(request, timeout: .seconds(120))
+
+                guard isRetryableStatus(Int(response.status.code)) else {
+                    return response
+                }
+
+                // Retryable error - read and close response
+                _ = try? await response.body.collect(upTo: 1024 * 1024)
+
+                if retryConfig.isExhausted(elapsedSince: startTime, attempt: attempt) {
+                    // Out of retry budget - hand back this last (still-erroring) response as-is,
+                    // the same way the official SDK returns the final response instead of raising.
+                    return response
+                }
+
+                let retryAfter = response.headers.first(name: "Retry-After").flatMap(RetryConfig.parseRetryAfter)
+                let delay = retryConfig.nextDelay(attempt: attempt, retryAfter: retryAfter)
+
+                try await Task.sleep(nanoseconds: UInt64(delay.nanoseconds))
+                attempt += 1
+
+            } catch let error as HTTPClientError {
+                if isRetryableNetworkError(error), !retryConfig.isExhausted(elapsedSince: startTime, attempt: attempt) {
+                    let delay = retryConfig.nextDelay(attempt: attempt, retryAfter: nil)
+                    try await Task.sleep(nanoseconds: UInt64(delay.nanoseconds))
+                    attempt += 1
+                    continue
+                }
+                throw error
+            }
+        }
+    }
+
+    private func isRetryableStatus(_ statusCode: Int) -> Bool {
+        return RetryConfig.retryableStatusCodes.contains(statusCode)
+    }
+
+    private func isRetryableNetworkError(_ error: HTTPClientError) -> Bool {
+        switch error {
+        case .connectTimeout, .readTimeout, .writeTimeout, .remoteConnectionClosed:
+            return true
+        default:
+            return false
+        }
     }
 }
 
