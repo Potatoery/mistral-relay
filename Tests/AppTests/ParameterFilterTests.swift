@@ -86,6 +86,53 @@ final class ParameterFilterTests: XCTestCase {
         }
     }
     
+    func testFilterRequestBodyRaisesTemperatureWhenZero() {
+        let input: [String: Any] = [
+            "model": "mistral-large-latest",
+            "messages": [
+                ["role": "user", "content": "Hello"]
+            ],
+            "temperature": 0.0,
+            "top_p": 0.9
+        ]
+
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
+
+        XCTAssertEqual(filtered["temperature"] as? Double, 0.2, "temperature should be raised to 0.2 when it is 0")
+        XCTAssertNotNil(filtered["top_p"], "top_p should be kept when temperature is raised from 0")
+    }
+
+    func testFilterRequestBodyKeepsTopPWhenTemperatureIsNonZero() {
+        let input: [String: Any] = [
+            "model": "mistral-large-latest",
+            "messages": [
+                ["role": "user", "content": "Hello"]
+            ],
+            "temperature": 0.7,
+            "top_p": 0.9
+        ]
+
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
+
+        XCTAssertNotNil(filtered["temperature"])
+        XCTAssertNotNil(filtered["top_p"], "top_p should be kept when temperature is non-zero")
+    }
+
+    func testFilterRequestBodyKeepsTopPWhenTemperatureAbsent() {
+        let input: [String: Any] = [
+            "model": "mistral-large-latest",
+            "messages": [
+                ["role": "user", "content": "Hello"]
+            ],
+            "top_p": 0.9
+        ]
+
+        let filtered = MistralParameters.filterRequestBody(input, logger: Logger(label: "test"))
+
+        XCTAssertNil(filtered["temperature"])
+        XCTAssertNotNil(filtered["top_p"], "top_p should be kept when temperature is absent")
+    }
+
     func testAllMistralParametersAreAllowed() {
         // This test verifies that all documented Mistral parameters are in the allowed list
         let allAllowedKeys = MistralParameters.allowedRequestBodyKeys

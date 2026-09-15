@@ -40,10 +40,11 @@ struct MistralParameters {
         "prefix"
     ]
     
-    /// Filter a dictionary to only include allowed keys, including nested message keys
+    /// Filter a dictionary to only include allowed keys, including nested message keys.
+    /// Also normalizes incompatible sampling parameters to prevent Mistral API 400 errors.
     static func filterRequestBody(_ body: [String: Any], logger: Logger) -> [String: Any] {
         var filtered: [String: Any] = [:]
-        
+
         for (key, value) in body {
             if allowedRequestBodyKeys.contains(key) {
                 if key == "messages", let messages = value as? [[String: Any]] {
@@ -66,7 +67,14 @@ struct MistralParameters {
                 logger.info("Filtering out unsupported top-level parameter: \(key)")
             }
         }
-        
+
+        // Mistral API requires top_p == 1 when temperature == 0 (greedy sampling).
+        // Raise temperature to 0.2 so top_p can be kept without triggering a 400.
+        if let temperature = filtered["temperature"] as? Double, temperature == 0 {
+            logger.info("Raising temperature from 0 to 0.2 to avoid greedy sampling conflict with top_p")
+            filtered["temperature"] = 0.2
+        }
+
         return filtered
     }
 }

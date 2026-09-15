@@ -240,6 +240,8 @@ The JSON body is dynamically parsed. Only official parameters listed in the Mist
   - `frequency_penalty`, `guardrails`, `max_tokens`, `messages`, `metadata`, `model`, `n`, `parallel_tool_calls`, `prediction`, `presence_penalty`, `prompt_cache_key`, `prompt_mode`, `random_seed`, `reasoning_effort`, `response_format`, `safe_prompt`, `service_tier`, `stop`, `stream`, `temperature`, `tool_choice`, `tools`, `top_p`.
 * **Stripped Parameters:**
   Any unlisted parameters (such as `unsupported_custom_param`) are logged on the console and removed from the payload before forwarding to Mistral.
+* **Sampling Parameter Normalization:**
+  When `temperature` is set to `0` (greedy sampling), the Mistral API requires `top_p` to be `1`. The relay automatically raises `temperature` to `0.2` in this case so `top_p` can be kept as-is, preventing a `400 top_p must be 1 when using greedy sampling` error.
 
 ---
 
@@ -327,10 +329,10 @@ To verify that your filters, proxies, and configurations are executing correctly
 swift test
 ```
 
-All 8 tests should pass successfully with zero failures and warnings:
+All 11 tests should pass successfully with zero failures and warnings:
 ```
 Build complete! (4.05 sec)
-Executed 8 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
+Executed 11 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
 ```
 
 ---
